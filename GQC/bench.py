@@ -305,9 +305,14 @@ def main() -> None:
        [mergedtruthcoveredbed, outputfiles["mergedtruthcovered"]] = bedtoolslib.mergebed(outputfiles["truthcovered"])
        [mergedtestmatcoveredbed, outputfiles["mergedtestmatcovered"]] = bedtoolslib.mergebed(outputfiles["testmatcovered"])
        [mergedtestpatcoveredbed, outputfiles["mergedtestpatcovered"]] = bedtoolslib.mergebed(outputfiles["testpatcovered"])
+       if bedregiondict["allexcludedregions"] is not None:
+           mergedtruthcoverednonexcludedbed = bedtoolslib.subtractintervals(mergedtruthcoveredbed, bedregiondict["allexcludedregions"])
+       else:
+           mergedtruthcoverednonexcludedbed = mergedtruthcoveredbed
+       mergedtruthcoverednonexcludedbed.saveas(outputfiles["truthcoverednonexcluded"])
 
        logger.info("Step 7 (of 11): Writing primary alignment statistics about " + args.assembly + " assembly")
-       stats.write_merged_aligned_stats(refobj, queryobj, mergedtruthcoveredbed, mergedtestmatcoveredbed, mergedtestpatcoveredbed, outputfiles, benchmark_stats, benchparams, args)
+       stats.write_merged_aligned_stats(refobj, queryobj, mergedtruthcoverednonexcludedbed, mergedtestmatcoveredbed, mergedtestpatcoveredbed, outputfiles, benchmark_stats, benchparams, args)
 
        if alignobj is not None:
            ## classify variant errors as phasing or novel errors:
@@ -319,7 +324,7 @@ def main() -> None:
 #
            ## evaluate mononucleotide runs:
            logger.info("Step 10 (of 11): Assessing accuracy of mononucleotide runs")
-           bedtoolslib.intersectbed(benchparams["mononucruns"], outputfiles["mergedtruthcovered"], outputfile=outputfiles["coveredmononucsfile"], writefirst=True)
+           bedtoolslib.intersectbed(benchparams["mononucruns"], outputfiles["truthcoverednonexcluded"], outputfile=outputfiles["coveredmononucsfile"], writefirst=True)
            mononucswithvariantsbedfile = bedtoolslib.intersectbed(outputfiles["coveredmononucsfile"], outputfiles["bencherrortypebed"], outputfiles["mononucswithvariantsfile"], outerjoin=True, writeboth=True)
            mononucstats = errors.gather_mononuc_stats(outputfiles["mononucswithvariantsfile"], outputfiles["mononucstatsfile"])
            stats.write_mononuc_stats(mononucstats, outputfiles, benchmark_stats, args)

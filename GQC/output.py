@@ -39,6 +39,7 @@ def name_output_files(args, outputdir:str)->dict:
     files["matalignedregions"] = outputdir + "/" + args.benchmark + ".mat.covered." + args.assembly + ".bed"
     files["patalignedregions"] = outputdir + "/" + args.benchmark + ".pat.covered." + args.assembly + ".bed"
     files["truthcovered"] = outputdir + "/" + args.assembly + ".benchcovered." + args.benchmark + ".bed"
+    files["truthcoverednonexcluded"] = outputdir + "/" + args.assembly + ".benchcovered.nonexcluded." + args.benchmark + ".bed"
     files["testmatcovered"] = outputdir + "/testmatcovered." + args.assembly + ".bed"
     files["testpatcovered"] = outputdir + "/testpatcovered." + args.assembly + ".bed"
     files["generalstatsfile"] = outputdir + "/" + args.assembly + ".generalstats.txt"

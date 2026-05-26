@@ -28,6 +28,18 @@ def calculate_nga_stats(truthintervals, totalbases:int)->dict:
 
     return ngastats
 
+def calculate_haplotype_bases(basecounts:dict, phap1, phap2)->tuple:
+
+    hap1totalbases = 0
+    hap2totalbases = 0
+    for chrom, chrombases in basecounts.items():
+        if phap1.match(chrom):
+            hap1totalbases = hap1totalbases + chrombases
+        if phap2.match(chrom):
+            hap2totalbases = hap2totalbases + chrombases
+
+    return hap1totalbases, hap2totalbases
+
 def write_general_assembly_stats(refobj, queryobj, contigregions, gapregions, outputfiles, benchparams, args)->dict:
 
     bmstats = {}
@@ -212,6 +224,17 @@ def write_merged_aligned_stats(refobj, queryobj, mergedtruthcoveredbed, mergedte
 
     hap1totalbases = bmstats['hap1totalbases'] # total MATERNAL bases in benchmark
     hap2totalbases = bmstats['hap2totalbases'] # total PATERNAL bases in benchmark
+    if "numnonexcludedbases" in bmstats:
+        hap1totalbases, hap2totalbases = calculate_haplotype_bases(bmstats["numnonexcludedbases"], phap1, phap2)
+    totalbenchbases = hap1totalbases + hap2totalbases
+    if "numnonexcludedbases" in bmstats:
+        benchmarkbasesdescription = "non-excluded MAT and PAT bases in benchmark"
+        matbasesdescription = "non-excluded MAT bases in benchmark"
+        patbasesdescription = "non-excluded PAT bases in benchmark"
+    else:
+        benchmarkbasesdescription = "all MAT and PAT bases in benchmark"
+        matbasesdescription = "MAT bases in benchmark"
+        patbasesdescription = "PAT bases in benchmark"
 
     matbenchcovered = 0
     patbenchcovered = 0
@@ -233,7 +256,7 @@ def write_merged_aligned_stats(refobj, queryobj, mergedtruthcoveredbed, mergedte
 
     hap1stats = calculate_nga_stats(hap1truthintervals, hap1totalbases)
     hap2stats = calculate_nga_stats(hap2truthintervals, hap2totalbases)
-    totalstats = calculate_nga_stats(mergedtruthintervals, hap1totalbases + hap2totalbases)
+    totalstats = calculate_nga_stats(mergedtruthintervals, totalbenchbases)
 
     longesttestalignment = 0
     totaltestmatcovered = 0
@@ -257,7 +280,7 @@ def write_merged_aligned_stats(refobj, queryobj, mergedtruthcoveredbed, mergedte
         bmstats["mataunga"] = hap1stats["aunga"]
     if hap2totalbases > 0:
         bmstats["pataunga"] = hap2stats["aunga"]
-    if hap1totalbases + hap2totalbases > 0:
+    if totalbenchbases > 0:
         bmstats["totalaunga"] = totalstats["aunga"]
 
     with open(generalstatsfile, "a") as gsfh:
@@ -274,7 +297,7 @@ def write_merged_aligned_stats(refobj, queryobj, mergedtruthcoveredbed, mergedte
             gsfh.write("NGA90 (for PATERNAL benchmark haplotype): " + str(round(hap2stats["nga90"]/1000000, 3)) + "Mb\n")
             gsfh.write("LGA90 (for PATERNAL benchmark haplotype): " + str(hap2stats["lga90"]) + "\n")
             gsfh.write("auNGA (for PATERNAL benchmark haplotype): " + str(round(hap2stats["aunga"]/1000000, 3)) + "Mb\n")
-        if hap1totalbases + hap2totalbases > 0:
+        if totalbenchbases > 0:
             gsfh.write("Total diploid NGA50: " + str(round(totalstats["nga50"]/1000000, 3)) + "Mb\n")
             gsfh.write("Total diploid LGA50: " + str(totalstats["lga50"]) + "\n")
             gsfh.write("Total diploid NGA90: " + str(round(totalstats["nga90"]/1000000, 3)) + "Mb\n")
@@ -282,24 +305,24 @@ def write_merged_aligned_stats(refobj, queryobj, mergedtruthcoveredbed, mergedte
             gsfh.write("Total diploid auNGA: " + str(round(totalstats["aunga"]/1000000, 3)) + "Mb\n")
         perctestmatcovered = int(totaltestmatcovered * 1000 / bmstats['totallargecontigbases'] + 0.5) / 10
         perctestpatcovered = int(totaltestpatcovered * 1000 / bmstats['totallargecontigbases'] + 0.5) / 10
-        if bmstats['hap1totalbases'] > 0 or bmstats['hap2totalbases'] > 0:
-            percbenchcovered = int(1000 * totalbenchcovered / (bmstats['hap1totalbases'] + bmstats['hap2totalbases']) + 0.5) / 10
+        if totalbenchbases > 0:
+            percbenchcovered = int(1000 * totalbenchcovered / totalbenchbases + 0.5) / 10
         else:
             percbenchcovered = 'NA'
-        if bmstats['hap1totalbases'] > 0:
-            percmatbenchcovered = int(1000 * matbenchcovered / bmstats['hap1totalbases'] + 0.5) / 10
+        if hap1totalbases > 0:
+            percmatbenchcovered = int(1000 * matbenchcovered / hap1totalbases + 0.5) / 10
         else:
             percmatbenchcovered = 'NA'
-        if bmstats['hap2totalbases'] > 0:
-            percpatbenchcovered = int(1000 * patbenchcovered / bmstats['hap2totalbases'] + 0.5) / 10
+        if hap2totalbases > 0:
+            percpatbenchcovered = int(1000 * patbenchcovered / hap2totalbases + 0.5) / 10
         else:
             percpatbenchcovered = 'NA'
         gsfh.write("Total " + args.assembly + " bases in aligns to MAT chromosomes: " + str(totaltestmatcovered) + "/" + str(bmstats['totallargecontigbases']) + " (" + str(perctestmatcovered) + "% of total bases in contigs >= " + str(args.mincontiglength) + " bases)" + "\n")
         gsfh.write("Total " + args.assembly + " bases in aligns to PAT chromosomes: " + str(totaltestpatcovered) + "/" + str(bmstats['totallargecontigbases']) + " (" + str(perctestpatcovered) + "% of total bases in contigs >= " + str(args.mincontiglength) + " bases)" + "\n")
         gsfh.write("Longest " + args.assembly + " alignment length (in test assembly bases) to the benchmark: " + str(round(longesttestalignment/1000000, 3)) + "Mb\n")
-        gsfh.write("Total " + args.benchmark + " covered: " + str(totalbenchcovered) + "/" + str(bmstats['totalbases']) + " (" + str(percbenchcovered) + "% of all MAT and PAT bases in benchmark)" + "\n" )
-        gsfh.write("MAT " + args.benchmark + " covered: " + str(matbenchcovered) + "/" + str(bmstats['hap1totalbases']) + " (" + str(percmatbenchcovered) + "% of MAT bases in benchmark)" + "\n")
-        gsfh.write("PAT " + args.benchmark + " covered: " + str(patbenchcovered) + "/" + str(bmstats['hap2totalbases']) + " (" + str(percpatbenchcovered) + "% of PAT bases in benchmark)" + "\n")
+        gsfh.write("Total " + args.benchmark + " covered: " + str(totalbenchcovered) + "/" + str(totalbenchbases) + " (" + str(percbenchcovered) + "% of " + benchmarkbasesdescription + ")" + "\n" )
+        gsfh.write("MAT " + args.benchmark + " covered: " + str(matbenchcovered) + "/" + str(hap1totalbases) + " (" + str(percmatbenchcovered) + "% of " + matbasesdescription + ")" + "\n")
+        gsfh.write("PAT " + args.benchmark + " covered: " + str(patbenchcovered) + "/" + str(hap2totalbases) + " (" + str(percpatbenchcovered) + "% of " + patbasesdescription + ")" + "\n")
 
     return bmstats
 
