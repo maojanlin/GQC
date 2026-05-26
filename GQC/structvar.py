@@ -1,60 +1,97 @@
 import sys
 import logging
+import pybedtools
 
 logger = logging.getLogger(__name__)
 
 # reminders: in aligndata, (1) all coordinates are 1-based, (2) strand is "+" or "-", (3) querystart is the query's lower coordinate,
 # so doesn't correspond to targetstart if alignment is on the reverse strand
 
-def write_structural_errors(aligndata:list, refobj, queryobj, outputdict, bmstats, args)->str:
+def add_structural_error(structural_errors:list, chrom:str, start:int, end:int, errortype:str, query:str, query1, query2, widestart, wideend, netdiff, strand:str):
+
+    structural_errors.append({
+        "chrom": chrom,
+        "start": start,
+        "end": end,
+        "line": chrom + "\t" + str(start) + "\t" + str(end) + "\t" + errortype + "\t" + query + "\t" + str(query1) + "\t" + str(query2) + "\t" + str(widestart) + "\t" + str(wideend) + "\t" + str(netdiff) + "\t" + strand + "\n"
+    })
+
+    return 0
+
+def write_structural_errors(aligndata:list, refobj, queryobj, outputdict, bmstats, args, excludedbedobj=None)->str:
 
     aligndict = {}
     current_align = None
-    with open(outputdict["structvariantbed"], "w") as sfh:
-        for align in sorted(aligndata, key=lambda a: (a["target"], a["targetstart"], a["targetend"])):
-            refentry = align["target"]
-            if refentry not in aligndict:
-                aligndict[refentry] = [align]
-            else:
-                aligndict[refentry].append(align)
-            query = align["query"]
-            refstart = align["targetstart"]
-            refend = align["targetend"]
-            querystart = align["querystart"]
-            queryend = align["queryend"]
-            strand = align["strand"]
-            if current_align is not None:
-                refdiff = refstart - current_align["targetend"]
-                if refentry == current_align["target"] and query == current_align["query"] and strand == current_align["strand"]:
-                    if strand == "+":
-                        querydiff = querystart - current_align["queryend"]
-                        query1 = current_align["queryend"]
-                        query2 = querystart
-                    else:
-                        querydiff = queryend - current_align["querystart"]
-                        query1 = querystart
-                        query2 = current_align["queryend"]
-   
-                    netdiff = querydiff - refdiff
-                    if refdiff < querydiff: # refdiff less than querydiff (insertion), netshift positive
-                        if refdiff > 0:
-                            sfh.write(refentry + "\t" + str(current_align["targetend"] - 1) + "\t" + str(refstart) + "\tSameContigInsertion\t" + query + "\t" + str(query1) + "\t" + str(query2) + "\t" + str(current_align["targetend"]) + "\t" + str(refstart) + "\t" + str(netdiff) + "\t" + strand + "\n")
-                        else:
-                            sfh.write(refentry + "\t" + str(refstart - 1) + "\t" + str(current_align["targetend"]) + "\tSameContigInsertion\t" + query + "\t" + str(query1) + "\t" + str(query2) + "\t" + str(current_align["targetend"]) + "\t" + str(refstart) + "\t" + str(netdiff) + "\t" + strand + "\n")
-                    else: # refdiff greater than than querydiff (deletion), netshift negative
-                        if refdiff > 0:
-                            sfh.write(refentry + "\t" + str(current_align["targetend"] - 1) + "\t" + str(refstart) + "\tSameContigDeletion\t" + query + "\t" + str(query1) + "\t" + str(query2) + "\t" + str(current_align["targetend"]) + "\t" + str(refstart) + "\t" + str(netdiff) + "\t" + strand + "\n")
-                        else:
-                            sfh.write(refentry + "\t" + str(refstart - 1) + "\t" + str(current_align["targetend"]) + "\tSameContigDeletion\t" + query + "\t" + str(query1) + "\t" + str(query2) + "\t" + str(current_align["targetend"]) + "\t" + str(refstart) + "\t" + str(netdiff) + "\t" + strand + "\n")
-    
-                elif refentry == current_align["target"]: # strand switch or new contig:
-                    queryentries = query + "/" + current_align["query"]
-                    strands = strand + "/" + current_align["strand"]
+    structural_errors = []
+    for align in sorted(aligndata, key=lambda a: (a["target"], a["targetstart"], a["targetend"])):
+        refentry = align["target"]
+        if refentry not in aligndict:
+            aligndict[refentry] = [align]
+        else:
+            aligndict[refentry].append(align)
+        query = align["query"]
+        refstart = align["targetstart"]
+        refend = align["targetend"]
+        querystart = align["querystart"]
+        queryend = align["queryend"]
+        strand = align["strand"]
+        if current_align is not None:
+            refdiff = refstart - current_align["targetend"]
+            if refentry == current_align["target"] and query == current_align["query"] and strand == current_align["strand"]:
+                if strand == "+":
+                    querydiff = querystart - current_align["queryend"]
+                    query1 = current_align["queryend"]
+                    query2 = querystart
+                else:
+                    querydiff = queryend - current_align["querystart"]
+                    query1 = querystart
+                    query2 = current_align["queryend"]
+
+                netdiff = querydiff - refdiff
+                if refdiff < querydiff: # refdiff less than querydiff (insertion), netshift positive
                     if refdiff > 0:
-                        sfh.write(refentry + "\t" + str(current_align["targetend"] - 1) + "\t" + str(refstart) + "\tBetweenContigDeletion\t" + queryentries + "\t.\t.\t" + str(current_align["targetend"]) + "\t" + str(refstart) + "\tNA\t" + strands + "\n")
+                        add_structural_error(structural_errors, refentry, current_align["targetend"] - 1, refstart, "SameContigInsertion", query, query1, query2, current_align["targetend"], refstart, netdiff, strand)
                     else:
-                        sfh.write(refentry + "\t" + str(refstart - 1) + "\t" + str(current_align["targetend"]) + "\tBetweenContigInsertion\t" + queryentries + "\t.\t.\t" + str(current_align["targetend"]) + "\t" + str(refstart) + "\tNA\t" +strands + "\n")
-            current_align = align
+                        add_structural_error(structural_errors, refentry, refstart - 1, current_align["targetend"], "SameContigInsertion", query, query1, query2, current_align["targetend"], refstart, netdiff, strand)
+                else: # refdiff greater than than querydiff (deletion), netshift negative
+                    if refdiff > 0:
+                        add_structural_error(structural_errors, refentry, current_align["targetend"] - 1, refstart, "SameContigDeletion", query, query1, query2, current_align["targetend"], refstart, netdiff, strand)
+                    else:
+                        add_structural_error(structural_errors, refentry, refstart - 1, current_align["targetend"], "SameContigDeletion", query, query1, query2, current_align["targetend"], refstart, netdiff, strand)
+
+            elif refentry == current_align["target"]: # strand switch or new contig:
+                queryentries = query + "/" + current_align["query"]
+                strands = strand + "/" + current_align["strand"]
+                if refdiff > 0:
+                    add_structural_error(structural_errors, refentry, current_align["targetend"] - 1, refstart, "BetweenContigDeletion", queryentries, ".", ".", current_align["targetend"], refstart, "NA", strands)
+                else:
+                    add_structural_error(structural_errors, refentry, refstart - 1, current_align["targetend"], "BetweenContigInsertion", queryentries, ".", ".", current_align["targetend"], refstart, "NA", strands)
+        current_align = align
+
+    excluded_indices = set()
+    if structural_errors and excludedbedobj:
+        structvarbedstring = ""
+        for index, structural_error in enumerate(structural_errors):
+            structvarbedstring = structvarbedstring + structural_error["chrom"] + "\t" + str(structural_error["start"]) + "\t" + str(structural_error["end"]) + "\t" + str(index) + "\n"
+        structvarbedobj = pybedtools.BedTool(structvarbedstring, from_string=True)
+        excludedsvs = structvarbedobj.intersect(excludedbedobj, wa=True)
+        for excludedsv in excludedsvs:
+            excluded_indices.add(int(excludedsv.name))
+
+    excludedfh = None
+    if "excludedstructvariantbed" in outputdict.keys():
+        excludedfh = open(outputdict["excludedstructvariantbed"], "w")
+    try:
+        with open(outputdict["structvariantbed"], "w") as sfh:
+            for index, structural_error in enumerate(structural_errors):
+                if index in excluded_indices:
+                    if excludedfh:
+                        excludedfh.write(structural_error["line"])
+                else:
+                    sfh.write(structural_error["line"])
+    finally:
+        if excludedfh:
+            excludedfh.close()
 
     return 0
 

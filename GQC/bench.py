@@ -289,7 +289,7 @@ def main() -> None:
     logger.info("Step 5 (of 11): Assessing overall structural alignment of assembly")
     # (by default, rlis_aligndata are split alignments filtered for RLIS)
     alignparse.assess_overall_structure(rlis_aligndata, refobj, queryobj, outputfiles, bedregiondict, benchmark_stats, args)
-    structvar.write_structural_errors(rlis_aligndata, refobj, queryobj, outputfiles, benchmark_stats, args)
+    structvar.write_structural_errors(rlis_aligndata, refobj, queryobj, outputfiles, benchmark_stats, args, bedregiondict["allexcludedregions"])
     stats.write_aligned_cluster_stats(outputfiles, benchmark_stats, args)
 
     if not args.structureonly:
