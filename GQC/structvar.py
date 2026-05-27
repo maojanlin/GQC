@@ -1,6 +1,7 @@
 import sys
 import logging
 import pybedtools
+from GQC import bedtoolslib
 
 logger = logging.getLogger(__name__)
 
@@ -69,14 +70,16 @@ def write_structural_errors(aligndata:list, refobj, queryobj, outputdict, bmstat
         current_align = align
 
     excluded_indices = set()
-    if structural_errors and excludedbedobj:
+    if structural_errors and excludedbedobj is not None and len(excludedbedobj) > 0:
         structvarbedstring = ""
         for index, structural_error in enumerate(structural_errors):
-            structvarbedstring = structvarbedstring + structural_error["chrom"] + "\t" + str(structural_error["start"]) + "\t" + str(structural_error["end"]) + "\t" + str(index) + "\n"
+            bed_start, bed_end = bedtoolslib.normalize_bed_interval(structural_error["start"], structural_error["end"])
+            structvarbedstring = structvarbedstring + structural_error["chrom"] + "\t" + str(bed_start) + "\t" + str(bed_end) + "\t" + str(index) + "\n"
         structvarbedobj = pybedtools.BedTool(structvarbedstring, from_string=True)
         excludedsvs = structvarbedobj.intersect(excludedbedobj, wa=True)
         for excludedsv in excludedsvs:
             excluded_indices.add(int(excludedsv.name))
+        logger.info("Excluded " + str(len(excluded_indices)) + " structural variants overlapping excluded benchmark regions")
 
     excludedfh = None
     if "excludedstructvariantbed" in outputdict.keys():

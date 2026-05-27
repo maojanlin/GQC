@@ -93,6 +93,15 @@ def subtractintervals(intervals1, intervals2, A=False, wb=False, wo=False):
 
     return subtractedints
 
+def normalize_bed_interval(start:int, end:int)->tuple:
+
+    bed_start = min(int(start), int(end))
+    bed_end = max(int(start), int(end))
+    if bed_end <= bed_start:
+        bed_end = bed_start + 1
+
+    return bed_start, bed_end
+
 def genomeintervals(fastafile:str):
 
     indexfile = fastafile + ".fai"
