@@ -33,6 +33,7 @@ def write_bedfiles(bamobj, pafaligns, refobj, queryobj, hetsites, testmatbed, te
     alignedscorecounts = []
     snverrorscorecounts = []
     indelerrorscorecounts = []
+    homopolymers = []
 
     if bamobj is not None:
         for align in bamobj.fetch():
@@ -51,7 +52,7 @@ def write_bedfiles(bamobj, pafaligns, refobj, queryobj, hetsites, testmatbed, te
                 querycoveredstring += query + "\t" + str(querystart - 1) + "\t" + str(queryend) + "\t" + refnamestring + "\n"
                 refcoveredstring += ref + "\t" + str(refstart - 1) + "\t" + str(refend) + "\t" + querynamestring + "\n"
                 if user_variantfile is None:
-                    variants.extend(align_variants(align, queryobj, query, querystart, queryend, refobj, ref, refstart, refend, strand, hetsites, hetsitealleles, alignedscorecounts, snverrorscorecounts, indelerrorscorecounts, True))
+                    variants.extend(align_variants(align, queryobj, query, querystart, queryend, refobj, ref, refstart, refend, strand, hetsites, hetsitealleles, alignedscorecounts, snverrorscorecounts, indelerrorscorecounts, homopolymers, True))
         # mark variants that are in excluded regions:
         logger.debug("Beginning to exclude variants in excluded regions")
         if excludedbedobj is not None and len(excludedbedobj) > 0:
@@ -162,7 +163,7 @@ def retrieve_align_data(align)->list:
 
 # query start and query end are the lower and higher endpoints of the query seq in query coordinates (1-based)
 # regardless of orientation of the alignment
-def align_variants(align, queryobj, query:str, querystart:int, queryend:int, refobj, ref:str, refstart:int, refend:int, strand:str, chromhetsites={}, hetsitealleles={}, alignedscorecounts=[], snverrorscorecounts=[], indelerrorscorecounts=[], widen=True)->list:
+def align_variants(align, queryobj, query:str, querystart:int, queryend:int, refobj, ref:str, refstart:int, refend:int, strand:str, chromhetsites={}, hetsitealleles={}, alignedscorecounts=[], snverrorscorecounts=[], indelerrorscorecounts=[], homopolymerlist=[], widen=True)->list:
 
     # coordinates are all one-based, with start at beginning of *original* sequence (not left end of the alignment)
     variantlist = []
@@ -221,6 +222,12 @@ def align_variants(align, queryobj, query:str, querystart:int, queryend:int, ref
         op = alignop[0]
         oplength = alignop[1]
 
+        # variables to keep track of reference homopolymers:
+        currenthprunstart = None
+        currenthprunend = None
+        hprunlastcovered = None
+        hpcurrentbase = None
+        hpcurrentalternate = ""
         if op in [0, 7, 8]: # MX= find SNV and MNVs
             for blockoffset in range(oplength):
                 refpos = refcurrentoffset + blockoffset # this is distance from left-most base of the alignment
@@ -237,7 +244,6 @@ def align_variants(align, queryobj, query:str, querystart:int, queryend:int, ref
                     continue
                 if refseq[refpos] != queryseq[querypos] and refseq[refpos] != "N" and queryseq[querypos] != "N":
                     variantname=query+"_"+str(querycoordinate)+"_"+refseq[refpos]+"_"+queryseq[querypos]+"_"+strand # query's 1-based position, ref base, query base (comp if rev strand), strand
-                    #additionalfields = "0\t" + bedstrand + "\t" + str(refpos+refstart-1) + "\t" + str(refpos+refstart) + "\t0,0,0\t" + alignstring
                     if alignedqualscores is not None:
                         snverrorscore = int(alignedqualscores[querypos])
                         snverrorscorecounts[snverrorscore] = snverrorscorecounts[snverrorscore] + 1
@@ -248,6 +254,22 @@ def align_variants(align, queryobj, query:str, querystart:int, queryend:int, ref
                     if alignedqualscores is not None:
                         snverrorscore = int(alignedqualscores[querypos])
                         snverrorscorecounts[snverrorscore] = snverrorscorecounts[snverrorscore] + 1
+                # keep track of homopolymer runs (in progress):
+                if hpcurrentbase is not None and refseq[refpos] == hpcurrentbase: # extend current homopolymer
+                    currenthprunend = refpos + refstart
+                    hpcurrentalternate = hpcurrentalternate + queryseq[querypos]
+                elif hpcurrentbase is None: # first base
+                    currenthprunstart = refpos + refstart - 1
+                    currenthprunend = refpos + refstart
+                else: # ref base has changed--is the current run long enough?
+                    if currenthprunend - currenthprunstart >= 10:
+                        variantname=query+"_"+str(querycoordinate)+"_"+refseq[refpos]+"_"+queryseq[querypos]+"_"+strand # query's 1-based position, ref base, query base (comp if rev strand), strand
+                        homopolymerlist.append(varianttuple(chrom=ref, start=refpos+refstart-hprunlength, end=refpos+refstart, name=variantname, vartype='HomHP', excluded=False, qvscore=0))
+                    currenthprunstart = refpos + refstart - 1
+                    currenthprunend = refpos + refstart
+                    hpcurrentbase = refseq[refpos]
+                    hpcurrentalternate = queryseq[querypos]
+                # end hp code in progress
 
                 query_positions.append(querypos)
             lastop = 'M'
@@ -293,7 +315,7 @@ def align_variants(align, queryobj, query:str, querystart:int, queryend:int, ref
                         queryquals = alignedqualscores[querycurrentoffset:querycurrentoffset+1]
                     qualscores = [int(x) for x in queryquals]
                 else:
-                    # here we are making the change to use the earliest base's quality score (first on left for forward aligned, first on right for reverse aligned),
+                    # here we have made the change to use the earliest base's quality score (first on left for forward aligned, first on right for reverse aligned),
                     # since PacBio callibrates its scores this way and ONT has fairly uniform scores across repetitive homopolymers
                     # having only one quality score in the qualscores array will assure that median qualscore is the relevant quality score to count as the error
                     #queryquals = alignedqualscores[querycurrentoffset-extendleft:querycurrentoffset+extendright]
@@ -329,30 +351,21 @@ def align_variants(align, queryobj, query:str, querystart:int, queryend:int, ref
                 variantname=query+"_"+str(querycoordinate)+"_"+refallele+"_"+queryallele+"_"+strand # positions of insertions are positions to the left of first inserted base
 
                 variantlist.append(varianttuple(chrom=ref, start=refpos+refstart-extendleft, end=refpos+refstart+oplength+extendright, name=variantname, vartype='INDEL', excluded=False, qvscore=indelerrorscore ))
+                if ((len(queryallele) > 10 or len(refallele) > 10) and is_homopolymer(queryallele + refallele)):
+                    homopolymerlist.append(varianttuple(chrom=ref, start=refpos+refstart-extendleft, end=refpos+refstart+oplength+extendright, name=variantname, vartype='HetHP', excluded=False, qvscore=0))
             else:
                 variantname=query+"_"+str(querycoordinate)+"_"+refallele+"_"+queryallele+"_"+strand # positions of insertions are positions to the left of first inserted base
-                #logger.debug("Variant with name " + variantname + " and queryallele " + queryallele + " and refallele " + refallele + " has query surrounding seq " + querysurroundingseq + " was excluded")
             lastop = 'D'
 
         if op == 1: # insertion
             refpos = refcurrentoffset-1;
             refallele = "*"
             queryallele = queryseq[querycurrentoffset:querycurrentoffset+oplength] # one-based querystart+querycurrentoffset to querystart+querycurrentoffset+oplength-1 if forward strand, queryend-querycurrentoffset to queryend-querycurrentoffset-oplength+1 if reverse
-            #if alignedqualscores is not None:
-                #queryquals = alignedqualscores[querycurrentoffset:querycurrentoffset+oplength]
-                #queryquals = alignedqualscores[querycurrentoffset-1:querycurrentoffset+oplength-1]
-                #qualscores = [int(x) for x in queryquals]
-                #for i in range(len(qualscores)):
-                    #logger.debug("Root insertion has quality " + str(qualscores[i]))
-            #query_positions.append(querycurrentoffset)
             extendright = 0
             extendleft = 0
             if widen is True: # n.b. - this will *lower* the righthand coordinate of reverse strand queries by "extendright"
                 while querycurrentoffset + extendright < queryalignlength and refcurrentoffset + extendright < refalignlength and refseq[refcurrentoffset + extendright] == queryseq[querycurrentoffset + extendright]:
                     queryallele = queryallele + refseq[refcurrentoffset + extendright]
-                    #if alignedqualscores is not None:
-                        #qualscores.append(int(alignedqualscores[querycurrentoffset + extendright]))
-                        #logger.debug("Appending " + str(qualscores[-1]) + " to right of qual array")
                     if refallele == "*":
                         refallele = refseq[refcurrentoffset + extendright]
                     else:
@@ -361,9 +374,6 @@ def align_variants(align, queryobj, query:str, querystart:int, queryend:int, ref
                 if lastop != 'D':
                     while querycurrentoffset - 1 + oplength - extendleft >= 0 and refcurrentoffset - 1 - extendleft >= 0 and refseq[refcurrentoffset - 1 - extendleft] == queryseq[querycurrentoffset - 1 + oplength - extendleft]:
                         queryallele = refseq[refcurrentoffset - extendleft - 1] + queryallele
-                        #if alignedqualscores is not None:
-                            #qualscores.insert(0, int(alignedqualscores[querycurrentoffset - 1 + oplength - extendleft]))
-                            #logger.debug("Appending " + str(qualscores[0]) + " to left of qual array")
                         if refallele == "*":
                             refallele = refseq[refcurrentoffset - extendleft - 1]
                         else:
@@ -371,23 +381,12 @@ def align_variants(align, queryobj, query:str, querystart:int, queryend:int, ref
                         extendleft = extendleft + 1
             if strand == 'F':
                 querycoordinate = querystart + querycurrentoffset - extendleft
-                querycoordend = querycoordinate + oplength - 1 # this is potentially off by one and could be a bug (see its use below)
             else:
-                #querycoordinate = queryend - querycurrentoffset - extendleft
-                querycoordinate = queryend - querycurrentoffset - extendright
-                querycoordend = querycoordinate - oplength - 1 # this is potentially off by one and could be a bug (see its use below)
+                querycoordinate = queryend - querycurrentoffset - extendright - oplength + 1
 
             # if there are quality scores, find the median quality across this insertion for our error tally (and to report in the output)
             indelerrorscore = None
             if alignedqualscores is not None:
-                ## Changing to use first quality score within widened, inserted sequence (in read alignment direction) because PacBio calibrates indel quality scores at that position:
-                #numquals = len(qualscores)
-                ## if even number of qual scores, drop the top one so the lower of the two medians is chosen (rather than an average, which may not be represented in the total qv score counts)
-                #if numquals==2*int(numquals/2):
-                    #qualscores.pop()
-                #medqual = int(statistics.median(qualscores))
-                #indelerrorscorecounts[medqual] = indelerrorscorecounts[medqual] + 1
-                #indelerrorscore = medqual
                 variantname=query+"_"+str(querycoordinate)+"_"+refallele+"_"+queryallele+"_"+strand
                 logger.debug(variantname + " querycurrentoffset " + str(querycurrentoffset) + " extendleft " + str(extendleft) + " extendright " + str(extendright) + " oplength " + str(oplength))
                 queryquals = alignedqualscores[querycurrentoffset-extendleft:querycurrentoffset + oplength+extendright]
@@ -418,12 +417,11 @@ def align_variants(align, queryobj, query:str, querystart:int, queryend:int, ref
             
             if not (matchns.match(queryallele) or matchns.match(refallele) or matchns.match(refsurroundingseq)):
                 variantname=query+"_"+str(querycoordinate)+"_"+refallele+"_"+queryallele+"_"+strand
-                #additionalfields = "0\t" + bedstrand + "\t" + str(refpos+refstart) + "\t" + str(refpos+refstart+extendright) + "\t0,0,0\t" + alignstring
-                #logger.debug("Variant with pos " + ref + ":" + str(refpos+refstart-extendleft) + "-" + str(refpos+refstart+extendright) + " name " + variantname + " and queryallele " + queryallele + " and refallele " + refallele + " has ref surrounding seq " + refsurroundingseq)
                 variantlist.append(varianttuple(chrom=ref, start=refpos+refstart-extendleft, end=refpos+refstart+extendright, name=variantname, vartype='INDEL', excluded=False, qvscore=indelerrorscore ))
+                if (len(queryallele) > 10 or len(refallele) > 10) and is_homopolymer(queryallele + refallele):
+                    homopolymerlist.append(varianttuple(chrom=ref, start=refpos+refstart-extendleft, end=refpos+refstart+extendright, name=variantname, vartype='HetHP', excluded=False, qvscore=0))
             else:
                 variantname=query+"_"+str(querycoordinate)+"_"+refallele+"_"+queryallele+"_"+strand
-                #logger.debug("Variant with name " + variantname + " and queryallele " + queryallele + " and refallele " + refallele + " has ref surrounding seq " + refsurroundingseq + " was excluded")
             lastop = 'I'
 
         # advance current positions: cases where reference coord advances (MDN=X):
@@ -622,6 +620,10 @@ def fix_adjacent_insertions_deletions(cigarops)->list:
             newcigarops.append([opnum, oplength])
 
     return newcigarops
+
+def is_homopolymer(allele:str)->bool:
+
+    return len(set(allele)) == 1
 
 def count_consumed_query(cigarops)->int:
 
@@ -1333,3 +1335,182 @@ def merge_trimmed_bamfiles(mattrimmedbamfile:str, pattrimmedbamfile:str, benchdi
 
     return mergedtrimmedbamfile
 
+def find_hets_and_coveredregions(bamobj, refobj, queryobj, alignmap:dict, args):
+
+    # strings which will be used to create bed files with pybedtools:
+    aligncoveredregions = ""
+    aligncoveredwindows = ""
+    hetvariants = ""
+    homopolymers = []
+    homopolymerstring = ""
+    # to avoid duplicates due to overlapping alignments:
+    includedvariantdict = {}
+    allwindowintervalswithcounts = pybedtools.BedTool("", from_string=True)
+    for align in bamobj.fetch():
+        query, querystart, queryend, ref, refstart, refend, strand = retrieve_align_data(align)
+        querycoords = query + ":" + str(querystart) + "-" + str(queryend)
+        refcoords = ref + ":" + str(refstart) + "-" + str(refend)
+        alignname = querycoords + "/" + refcoords
+
+        windowintervalswithcounts = pybedtools.BedTool("", from_string=True)
+        boundarylist = []
+        if alignname in alignmap.keys():
+            if alignmap[alignname]['intervals'] is None:
+                boundarylist.append([refstart, refend])
+            else:
+                for intervalpair in alignmap[alignname]['intervals']:
+                    boundarylist.append(intervalpair)
+
+            for intervalpair in boundarylist:
+                [restrictedstart, restrictedend] = intervalpair
+                # add query\tstart\tstop\tname\tscore\tstrand to covered string:
+                if restrictedstart < 1 or restrictedend < 1:
+                    logger.debug("Ignoring alignment from " + querycoords + " to " + refcoords + " due to invalid restrictedstart " + str(restrictedstart))
+                else:
+                    coveredstring = ref + "\t" + str(restrictedstart - 1) + "\t" + str(restrictedend) + "\t" + querycoords + "/" + strand + "\t0.0\t" + strand + "\n"
+                    aligncoveredregions = aligncoveredregions + coveredstring
+                    coveredwindows = make_covered_window_string(ref, restrictedstart, restrictedend, query, querystart, queryend, strand, args)
+        
+                    aligncoveredwindows = aligncoveredwindows + coveredwindows
+    
+                    alignhetvariants = ""
+                    novelhetvariantstring = ""
+                    variantlist = align_variants(align, queryobj, query, querystart, queryend, refobj, ref, refstart, refend, strand)
+                    for variant in variantlist:
+                        chrom = variant.chrom
+                        start = variant.start
+                        end = variant.end
+                        if start >= restrictedstart and end < restrictedend:
+                            name = variant.name
+                            alignment = alignname + "." + str(restrictedstart) + "_" + str(restrictedend)
+                            variantstring = chrom + "\t" + str(start) + "\t" + str(end) + "\t" + name + "\t" + alignment + "\n"
+                            alignhetvariants = alignhetvariants + variantstring
+                            if name not in includedvariantdict.keys():
+                                novelhetvariantstring = novelhetvariantstring + variantstring
+                                includedvariantdict[name] = 1
+    
+                    hetvariants = hetvariants + novelhetvariantstring
+    
+                    variantintervals = pybedtools.BedTool(alignhetvariants, from_string=True)
+                    coveredwindowintervals = pybedtools.BedTool(coveredwindows, from_string=True)
+    
+                    alignintervalswithcounts = bedtoolslib.intersectintervals(coveredwindowintervals, variantintervals, wa=True, counts=True)
+
+                    numvars = len(variantintervals)
+                    numwindows = len(coveredwindowintervals)
+                    numcounts = len(alignintervalswithcounts)
+                    logger.debug("Intersected " + str(numwindows) + " windows with " + str(numvars) + " variants and got " + str(numcounts) + " intervals with counts for align " + alignname)
+                    windowintervalswithcounts = windowintervalswithcounts.cat(alignintervalswithcounts, postmerge=False)
+                    logger.debug("windowintervalwithcounts has " + str(len(windowintervalswithcounts)) + " windows with counts for align " + alignname)
+
+        logger.debug("Gathered " + str(len(windowintervalswithcounts)) + " windows with counts for align " + alignname)
+        allwindowintervalswithcounts = allwindowintervalswithcounts.cat(windowintervalswithcounts, postmerge=False)
+
+    return aligncoveredregions, allwindowintervalswithcounts, hetvariants, homopolymerstring
+
+# reads aligns from a bam file, and returns (a) a BED object with all same-autosome (or X/Y) aligned reference intervals (unmerged)
+# (b) a BED object with query intervals, and (c) a dictionary of alignments query-able by alignment name (which is query:start-end/ref:start-end
+def read_aligns(bamobj, args):
+    aligns = {}
+
+    querybedstring = ''
+    refbedstring = ''
+    for align in bamobj.fetch():
+        if align.is_secondary:
+            continue
+        if align.reference_length >= args.minalignlength:
+            query, querystart, queryend, ref, refstart, refend, strand = retrieve_align_data(align)
+            querycoords = query + ":" + str(querystart) + "-" + str(queryend)
+            refcoords = ref + ":" + str(refstart) + "-" + str(refend)
+            querychrom = query.split(args.splitchar)[args.chromindex]
+            refchrom = ref.split(args.splitchar)[args.chromindex]
+
+            if querychrom == refchrom or (querychrom == "chrX" and refchrom == "chrY") or (querychrom == "chrY" and refchrom == "chrX"):
+                alignname = querycoords + "/" + refcoords
+                aligns[alignname] = align
+                querybedstring = querybedstring + query + "\t" + str(querystart) + "\t" + str(queryend) + "\t" + alignname + "\n"
+                refbedstring = refbedstring + ref + "\t" + str(refstart) + "\t" + str(refend) + "\t" + alignname + "\n"
+
+    refalignintervals = pybedtools.BedTool(refbedstring, from_string=True)
+    queryalignintervals = pybedtools.BedTool(querybedstring, from_string=True)
+
+    return refalignintervals, queryalignintervals, aligns
+
+def find_corresponding_alignment_pairs(alignobj1, alignobj2, refobj1, refobj2, aligndict1, aligndict2, querybed1, querybed2, args):
+
+    alignmapping = {}
+    orthologymapstring1 = ""
+    orthologymapstring2 = ""
+    # look at aligns in the first direction, e.g., maternal aligned to paternal
+    for align1 in alignobj1.fetch():
+        query1, querystart1, queryend1, ref1, refstart1, refend1, strand1 = retrieve_align_data(align1)
+        refcoords1 = ref1 + ":" + str(refstart1) + "-" + str(refend1)
+        querycoords1 = query1 + ":" + str(querystart1) + "-" + str(queryend1)
+        align1name = querycoords1+"/"+refcoords1
+        align2name = refcoords1+"/"+querycoords1
+
+        # when there are reciprocal best alignments between haplotypes with matching endpoints in bam1 and bam2, use them:
+        if align1name in aligndict1.keys() and align2name in aligndict2.keys():
+            align2 = aligndict2[align2name]
+            logger.debug("MATCH\t" + align1name + " and " + align2name)
+            query2, querystart2, queryend2, ref2, refstart2, refend2, strand2 = retrieve_align_data(align2)
+            refcoords2 = ref2 + ":" + str(refstart2) + "-" + str(refend2)
+            if querycoords1 == refcoords2 and refend1 - refstart1 >= args.minalignlength:
+                alignmapping[align1name] = {'align':align1, 'intervals':None}
+                alignmapping[align2name] = {'align':align2, 'intervals':None}
+                orthologymapstring1 = orthologymapstring1 + ref1 + "\t" + str(refstart1 - 1) + "\t" + str(refend1) + "\t" + align1name + ".1to1" + "\n"
+                orthologymapstring2 = orthologymapstring2 + ref2 + "\t" + str(refstart2 - 1) + "\t" + str(refend2) + "\t" + align2name + ".1to1" + "\n"
+            elif refend1 - refstart1 >= args.minalignlength:
+                logger.warn("Matching alignment " + align2name + " has unexpected reference coords")
+        # without 1-1 requirement, will also allow alignments contained in larger opposite-direction alignments to be included
+        elif args.non1to1 and align1name in aligndict1.keys():
+            refinterval = pybedtools.BedTool(ref1 + "\t" + str(refstart1) + "\t" + str(refend1), from_string = True)
+            intersectingaligns = bedtoolslib.intersectintervals(refinterval, querybed2, wb=True)
+            for aligninterval in intersectingaligns:
+                align2name = aligninterval[6]
+                align2chrom = aligninterval.chrom
+                align2start = aligninterval.start
+                align2end = aligninterval.end
+                logger.debug(align1name + " intersectalign " + align2name)
+                querycoords2 = aligninterval.chrom + ":" + str(aligninterval.start) + "-" + str(aligninterval.end)
+                if align2name in aligndict2.keys():
+                    align2 = aligndict2[align2name]
+                    query2, querystart2, queryend2, ref2, refstart2, refend2, strand2 = retrieve_align_data(align2)
+                    querycoords2 = query2 + ":" + str(querystart2) + "-" + str(queryend2)
+                    refcoords2 = ref2 + ":" + str(refstart2) + "-" + str(refend2)
+                    # trim to common within endpoints from bam1:
+                    [commonref1start, commonref1end] = compare_alignments(align1, align2, switched=True)
+                    logger.debug("MISMATCH\t" + refcoords1 + "/" + querycoords1 + "\t" + str(commonref1start) + "\t" + str(commonref1end))
+                    if commonref1start is not None and commonref1end is not None and commonref1start != -1:
+                        if align1name not in alignmapping.keys():
+                            alignmapping[align1name] = {'align':align1, 'intervals':[[commonref1start, commonref1end]]}
+                        elif alignmapping[align1name]['intervals'] is None:
+                            logger.debug("Align " + align1name + " already exists in alignmapping dictionary with no restriction intervals")
+                            alignmapping[align1name]['intervals'] = [[commonref1start, commonref1end]]
+                        else:
+                            alignmapping[align1name]['intervals'].append([commonref1start, commonref1end])
+                        orthologymapstring1 = orthologymapstring1 + ref1 + "\t" + str(refstart1 - 1) + "\t" + str(refend1) + "\t" + align1name + "." + str(commonref1start) + "_" + str(commonref1end) + "\n"
+                    elif commonref1start is None and queryend1 - querystart1 > 1000000:
+                        logger.debug("LONG MISMATCH length " + str(queryend1 - querystart1))
+                    # now trim to common within endpoints from bam2:
+                    [commonref2start, commonref2end] = compare_alignments(align2, align1, switched=True)
+                    logger.debug("MISMATCH\t" + refcoords2 + "/" + querycoords2 + "\t" + str(commonref2start) + "\t" + str(commonref2end))
+                    if commonref2start is not None and commonref2end is not None and commonref2start != -1:
+                        if align2name not in alignmapping.keys():
+                            alignmapping[align2name] = {'align':align2, 'intervals':[[commonref2start, commonref2end]]}
+                        elif alignmapping[align2name]['intervals'] is None:
+                            logger.debug("Align " + align2name + " already exists in alignmapping dictionary with no restriction intervals")
+                            alignmapping[align1name]['intervals'] = [[commonref1start, commonref1end]]
+                        else:
+                            alignmapping[align2name]['intervals'].append([commonref2start, commonref2end])
+                        orthologymapstring2 = orthologymapstring2 + ref2 + "\t" + str(refstart2 - 1) + "\t" + str(refend2) + "\t" + align2name + "." + str(commonref2start) + "_" + str(commonref2end) + "\n"
+                    elif commonref2start is None and queryend2 - querystart2 > 1000000:
+                        logger.debug("LONG MISMATCH length " + str(queryend2 - querystart2))
+
+    with open(args.prefix + ".orthoregions1.bed", "w") as ofh1:
+        ofh1.write(orthologymapstring1)
+
+    with open(args.prefix + ".orthoregions2.bed", "w") as ofh2:
+        ofh2.write(orthologymapstring2)
+
+    return alignmapping
