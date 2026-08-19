@@ -1,11 +1,13 @@
 import pytest
 import os
 import pysam
+import pybedtools
 from GQC import bench
 from GQC import output
 from GQC import seqparse
 from GQC import alignparse
 from GQC import mummermethods
+from GQC import bedtoolslib
 
 def test_checkforprogs_when_tools_present(monkeypatch):
     monkeypatch.setattr(bench.shutil, "which", lambda _: "/usr/bin/fake")
@@ -117,3 +119,42 @@ def test_query_index_preserves_cluster_order_and_assignment():
     assert clusters_by_query['query_a'] == [
         cluster for cluster in indexed_clusters if cluster['query'] == 'query_a'
     ]
+
+
+@pytest.mark.parametrize(
+    'intervals,expected',
+    [
+        ([], []),
+        ([(1, 5)], [(1, 5)]),
+        ([(1, 5), (5, 8)], [(1, 8)]),
+        ([(8, 10), (1, 5), (3, 7)], [(1, 7), (8, 10)]),
+    ],
+)
+def test_merge_coordinate_intervals(intervals, expected):
+    assert alignparse.merge_coordinate_intervals(intervals) == expected
+
+
+@pytest.mark.parametrize(
+    'covered,excluded',
+    [
+        ([(0, 10)], []),
+        ([(0, 10)], [(2, 5)]),
+        ([(0, 10), (20, 30)], [(5, 25)]),
+        ([(0, 10)], [(0, 2), (8, 15)]),
+        ([(0, 10)], [(10, 20)]),
+    ],
+)
+def test_in_process_subtraction_matches_bedtools(covered, excluded):
+    covered_bed = pybedtools.BedTool(
+        ''.join('chr1\t{}\t{}\n'.format(start, end) for start, end in covered),
+        from_string=True,
+    )
+    if excluded:
+        excluded_bed = pybedtools.BedTool(
+            ''.join('chr1\t{}\t{}\n'.format(start, end) for start, end in excluded),
+            from_string=True,
+        )
+        expected = bedtoolslib.bedsum(covered_bed.subtract(excluded_bed))
+    else:
+        expected = bedtoolslib.bedsum(covered_bed)
+    assert alignparse.subtract_interval_length(covered, excluded) == expected

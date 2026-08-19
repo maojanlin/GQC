@@ -833,6 +833,47 @@ def populate_numnonexcludedbases(refobj, bedobjects:dict, benchmark_stats:dict)-
             if ref in benchmark_stats["numnonexcludedbases"].keys():
                 benchmark_stats["numnonexcludedbases"][ref] = benchmark_stats["numnonexcludedbases"][ref] - len(interval)
 
+
+def merge_coordinate_intervals(intervals:list)->list:
+    """Merge overlapping or book-ended zero-based, half-open intervals."""
+    if not intervals:
+        return []
+    sorted_intervals = sorted(intervals)
+    merged = [list(sorted_intervals[0])]
+    for start, end in sorted_intervals[1:]:
+        if start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    return [tuple(interval) for interval in merged]
+
+
+def interval_total_length(intervals:list)->int:
+    return sum(end - start for start, end in intervals)
+
+
+def subtract_interval_length(merged_intervals:list, merged_excluded:list)->int:
+    """Return bases in merged_intervals not covered by merged_excluded."""
+    if not merged_intervals:
+        return 0
+    if not merged_excluded:
+        return interval_total_length(merged_intervals)
+
+    covered = interval_total_length(merged_intervals)
+    excluded_overlap = 0
+    excluded_index = 0
+    for start, end in merged_intervals:
+        while excluded_index < len(merged_excluded) and merged_excluded[excluded_index][1] <= start:
+            excluded_index += 1
+        check_index = excluded_index
+        while check_index < len(merged_excluded):
+            excluded_start, excluded_end = merged_excluded[check_index]
+            if excluded_start >= end:
+                break
+            excluded_overlap += max(0, min(end, excluded_end) - max(start, excluded_start))
+            check_index += 1
+    return covered - excluded_overlap
+
 # this routine assumes query start > query end for reverse strand alignments
 def assess_overall_structure(aligndata:list, refobj, queryobj, outputfiles, bedobjects, benchmark_stats, args):
 
@@ -855,6 +896,17 @@ def assess_overall_structure(aligndata:list, refobj, queryobj, outputfiles, bedo
             aligndict[refentry] = [align]
         else:
             aligndict[refentry].append(align)
+
+    excluded_by_ref = {}
+    if bedobjects["allexcludedregions"] is not None:
+        for interval in bedobjects["allexcludedregions"]:
+            excluded_by_ref.setdefault(interval.chrom, []).append(
+                (interval.start, interval.end)
+            )
+    for refentry in excluded_by_ref:
+        excluded_by_ref[refentry] = merge_coordinate_intervals(
+            excluded_by_ref[refentry]
+        )
 
     # assess each benchmark entry, one by one
     for refentry in sorted(aligndict.keys()):
@@ -894,18 +946,16 @@ def assess_overall_structure(aligndata:list, refobj, queryobj, outputfiles, bedo
             clusterquery = cluster["query"] 
             clusterslope = cluster["slope"]
             clusterintercept = cluster["intercept"]
-            clusterbedstring = ""
-            for align in sorted(cluster["aligns"], key=lambda a: (a["targetstart"], a["targetend"])):
-                clusterbedstring = clusterbedstring + refentry + "\t" + str(align["targetstart"]) + "\t" + str(align["targetend"]) + "\t" + clusterquery + "_" + str(align["querystart"]) + "_" + str(align["queryend"]) + "\n"
-
-            bedtool = pybedtools.BedTool(clusterbedstring, from_string = True)
-            mergedbedtool = bedtoolslib.mergeintervals(bedtool)
-            clusterbases = bedtoolslib.bedsum(mergedbedtool)
-            if bedobjects["allexcludedregions"] is not None:
-                nonexcludedbedtool = bedtoolslib.subtractintervals(mergedbedtool, bedobjects["allexcludedregions"])
-            else:
-                nonexcludedbedtool = mergedbedtool
-            cluster["nonexcludedcoveredbases"] = bedtoolslib.bedsum(nonexcludedbedtool)
+            clusterintervals = [
+                (align["targetstart"], align["targetend"])
+                for align in cluster["aligns"]
+            ]
+            mergedintervals = merge_coordinate_intervals(clusterintervals)
+            clusterbases = interval_total_length(mergedintervals)
+            cluster["nonexcludedcoveredbases"] = subtract_interval_length(
+                mergedintervals,
+                excluded_by_ref.get(refentry, []),
+            )
             logger.debug("Cluster on " + clusterquery + " has " + str(clusterbases) + " non-redundant bases, " + str(cluster["nonexcludedcoveredbases"]) + " of which are not excluded")
 
         logger.debug("See how many " + refentry + " clusters are needed to cover 95% of ref")
@@ -915,7 +965,7 @@ def assess_overall_structure(aligndata:list, refobj, queryobj, outputfiles, bedo
         lca95 = None
         nca95 = None
         clusterno = 1
-        refentrybedstring = ""
+        refentrybedrecords = []
         for cluster in sorted(refalignclusters, key=lambda c:c["nonexcludedcoveredbases"], reverse = True):
             clusterquery = cluster["query"] 
             for align in sorted(cluster["aligns"], key=lambda a: (a["targetstart"], a["targetend"])):
@@ -923,7 +973,14 @@ def assess_overall_structure(aligndata:list, refobj, queryobj, outputfiles, bedo
                     clustername = "Cluster" + str(clusterno)
                 else:
                     clustername = "SmallCluster" + str(clusterno)
-                refentrybedstring = refentrybedstring + refentry + "\t" + str(align["targetstart"]) + "\t" + str(align["targetend"]) + "\t" + clusterquery + "_" + str(align["querystart"]) + "_" + str(align["queryend"]) + "_" + clustername + "\n"
+                refentrybedrecords.append((
+                    align["targetstart"],
+                    align["targetend"],
+                    refentry + "\t" + str(align["targetstart"]) + "\t" +
+                    str(align["targetend"]) + "\t" + clusterquery + "_" +
+                    str(align["querystart"]) + "_" + str(align["queryend"]) +
+                    "_" + clustername + "\n",
+                ))
             clusterno = clusterno + 1
 
             nebases = cluster["nonexcludedcoveredbases"]
@@ -937,9 +994,10 @@ def assess_overall_structure(aligndata:list, refobj, queryobj, outputfiles, bedo
                 nca95 = cluster["nonexcludedcoveredbases"]
 
         logger.debug("Saving BED file for " + refentry + " clusters")
-        refentrybedtool = pybedtools.BedTool(refentrybedstring, from_string = True)
-        sortedrefentrybedtool = refentrybedtool.sort()
-        sortedrefentrybedtool.saveas(alignplotprefix + "." + refentry + ".clusters.bed")
+        refentrybedrecords.sort(key=lambda record: (record[0], record[1]))
+        with open(alignplotprefix + "." + refentry + ".clusters.bed", "w") as bedfh:
+            for _, _, bedline in refentrybedrecords:
+                bedfh.write(bedline)
 
         # Note: lca95 will be "None" for reference entries not able to be covered
         benchmark_stats["clustercoverage"][refentry] = {"lca95":lca95, "nonexcludedcovered":totalnonexcludedcovered}
