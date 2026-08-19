@@ -81,3 +81,39 @@ def test_writebedfiles(tmp_path, monkeypatch):
 
     assert(len(aligndata) == 1)
 
+
+def test_query_index_preserves_cluster_order_and_assignment():
+    def make_align(query, targetstart, targetend, querystart, queryend):
+        return {
+            'query': query,
+            'targetstart': targetstart,
+            'targetend': targetend,
+            'querystart': querystart,
+            'queryend': queryend,
+        }
+
+    aligns = [
+        make_align('query_a', 100, 200, 100, 200),
+        make_align('query_b', 1000, 1100, 100, 200),
+        make_align('query_a', 210, 310, 210, 310),
+        make_align('query_b', 5000, 5100, 1000, 1100),
+        make_align('query_a', 5000, 5100, 1000, 1100),
+    ]
+
+    original_clusters = []
+    indexed_clusters = []
+    clusters_by_query = {}
+    for align in aligns:
+        alignparse.add_align_to_clusters(align, original_clusters, 100)
+        alignparse.add_align_to_clusters(
+            align,
+            indexed_clusters,
+            100,
+            clusters_by_query=clusters_by_query,
+        )
+
+    assert indexed_clusters == original_clusters
+    assert list(clusters_by_query) == ['query_a', 'query_b']
+    assert clusters_by_query['query_a'] == [
+        cluster for cluster in indexed_clusters if cluster['query'] == 'query_a'
+    ]

@@ -861,6 +861,11 @@ def assess_overall_structure(aligndata:list, refobj, queryobj, outputfiles, bedo
         logger.debug("Entry " + refentry + " start")
         refnelength = benchmark_stats["numnonexcludedbases"][refentry]
         refalignclusters = []
+        # Clusters can only accept alignments from the same query sequence.
+        # Keep a per-query index so each alignment does not scan unrelated
+        # clusters. The lists retain the creation order from refalignclusters,
+        # preserving the original first-match clustering behavior.
+        refclusters_by_query = {}
         # sort alignments from longest (along the benchmark) to shortest:
         numaligns = len(aligndict[refentry])
         logger.debug("Sorting " + str(numaligns) + " " + refentry + " aligns")
@@ -873,7 +878,12 @@ def assess_overall_structure(aligndata:list, refobj, queryobj, outputfiles, bedo
             alignquery = refalign['query']
             alignquerystart = refalign['querystart']
             alignqueryend = refalign['queryend']
-            add_align_to_clusters(refalign, refalignclusters, maxdistance)
+            add_align_to_clusters(
+                refalign,
+                refalignclusters,
+                maxdistance,
+                clusters_by_query=refclusters_by_query,
+            )
 
         # split clusters that are separated along the target by more than maxdistance:
         logger.debug("Splitting " + refentry + " clusters")
@@ -1114,7 +1124,12 @@ def compare_alignments(align1, align2, switched=False):
 
     return [alignoverlaprefstart, lastoverlaprefstart]
 
-def add_align_to_clusters(align:dict, alignclusters:list, maxdistance:int):
+def add_align_to_clusters(
+    align:dict,
+    alignclusters:list,
+    maxdistance:int,
+    clusters_by_query:dict=None,
+):
 
     alignstart = align['targetstart']
     alignend = align['targetend']
@@ -1124,9 +1139,14 @@ def add_align_to_clusters(align:dict, alignclusters:list, maxdistance:int):
     alignslope = (alignend - alignstart)/(alignqueryend-alignquerystart)
     alignintercept = alignstart - int(alignslope * alignquerystart)
 
-    # try to assign this align to a pre-existing cluster of aligns:
+    # Try to assign this align to a pre-existing cluster of aligns. When an
+    # index is supplied, only clusters for this query need to be examined.
+    candidateclusters = alignclusters
+    if clusters_by_query is not None:
+        candidateclusters = clusters_by_query.get(alignquery, [])
+
     assigned = False
-    for cluster in alignclusters:
+    for cluster in candidateclusters:
         if cluster["query"] != alignquery:
             continue
         clusterquery = cluster["query"]
@@ -1140,7 +1160,10 @@ def add_align_to_clusters(align:dict, alignclusters:list, maxdistance:int):
 
     # create a new cluster if none were appropriate
     if not assigned:
-        alignclusters.append({'query':alignquery, 'slope':alignslope, 'intercept':alignintercept, 'aligns':[align]})
+        newcluster = {'query':alignquery, 'slope':alignslope, 'intercept':alignintercept, 'aligns':[align]}
+        alignclusters.append(newcluster)
+        if clusters_by_query is not None:
+            clusters_by_query.setdefault(alignquery, []).append(newcluster)
 
     return 0
 
